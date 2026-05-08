@@ -61,6 +61,63 @@ def test_create_task_no_parents_is_ready(kanban_home):
     assert t.workspace_kind == "scratch"
 
 
+def test_create_task_persists_team_fields(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="team task",
+            lead_team=" 開発・自動化 ",
+            support_teams=["品質・リスク", "", "品質・リスク", "通知・承認"],
+            audit_team=" 品質・リスク ",
+        )
+        t = kb.get_task(conn, tid)
+        created = [e for e in kb.list_events(conn, tid) if e.kind == "created"][0]
+    assert t is not None
+    assert t.lead_team == "開発・自動化"
+    assert t.support_teams == ["品質・リスク", "通知・承認"]
+    assert t.audit_team == "品質・リスク"
+    assert created.payload["lead_team"] == "開発・自動化"
+    assert created.payload["support_teams"] == ["品質・リスク", "通知・承認"]
+    assert created.payload["audit_team"] == "品質・リスク"
+
+
+def test_team_fields_normalize_known_aliases(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="alias team task",
+            lead_team="dev",
+            support_teams=["qa", "品質リスク", "approval"],
+            audit_team="risk",
+        )
+        t = kb.get_task(conn, tid)
+    assert t is not None
+    assert t.lead_team == "開発・自動化"
+    assert t.support_teams == ["品質・リスク", "通知・承認"]
+    assert t.audit_team == "品質・リスク"
+
+
+def test_lead_team_assigns_default_team_lead_when_assignee_missing(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="team-owned task", lead_team="品質リスク")
+        t = kb.get_task(conn, tid)
+    assert t is not None
+    assert t.lead_team == "品質・リスク"
+    assert t.assignee == "release-verifier"
+
+
+def test_support_teams_malformed_json_normalizes_to_none(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="legacy malformed")
+        conn.execute(
+            "UPDATE tasks SET support_teams = ? WHERE id = ?",
+            ("not json", tid),
+        )
+        t = kb.get_task(conn, tid)
+    assert t is not None
+    assert t.support_teams is None
+
+
 def test_create_task_with_parent_is_todo_until_parent_done(kanban_home):
     with kb.connect() as conn:
         p = kb.create_task(conn, title="parent")
@@ -68,6 +125,61 @@ def test_create_task_with_parent_is_todo_until_parent_done(kanban_home):
         assert kb.get_task(conn, c).status == "todo"
         kb.complete_task(conn, p, result="ok")
         assert kb.get_task(conn, c).status == "ready"
+
+
+def test_controlled_task_completion_requires_evidence_packet(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="controlled recovery",
+            body="CORE_MISSION_CONTRACT\nDIRECT_JOB_ARTIFACT_RECOVERY",
+        )
+        with pytest.raises(kb.CompletionContractError, match="completion_marker"):
+            kb.complete_task(conn, tid, result="done")
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+
+    assert task is not None
+    assert task.status == "ready"
+    assert any(event.kind == "completion_blocked_contract" for event in events)
+
+
+def test_controlled_task_completion_accepts_structured_evidence(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="controlled review",
+            body="CORE_MISSION_CONTRACT\nCLEAN_REVIEW_PACKET",
+        )
+        ok = kb.complete_task(
+            conn,
+            tid,
+            result="review passed",
+            summary="review passed",
+            metadata={
+                "completion_marker": "REVIEW_PASS",
+                "tests": ["pytest focused"],
+                "evidence_paths": ["/tmp/evidence.txt"],
+                "verdict": "PASS",
+                "approved": True,
+            },
+        )
+        task = kb.get_task(conn, tid)
+
+    assert ok is True
+    assert task is not None
+    assert task.status == "done"
+
+
+def test_blocked_report_completion_is_rejected_even_without_contract(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="plain direct report")
+        with pytest.raises(kb.CompletionContractError, match="blocked/unfinished"):
+            kb.complete_task(conn, tid, result="Overall status is BLOCKED. Do not integrate.")
+        task = kb.get_task(conn, tid)
+
+    assert task is not None
+    assert task.status == "ready"
 
 
 def test_create_task_unknown_parent_errors(kanban_home):

@@ -364,6 +364,7 @@
 
     const [tenantFilter, setTenantFilter] = useState("");
     const [assigneeFilter, setAssigneeFilter] = useState("");
+    const [teamFilter, setTeamFilter] = useState("");
     const [includeArchived, setIncludeArchived] = useState(false);
     const [search, setSearch] = useState("");
     const [laneByProfile, setLaneByProfile] = useState(true);
@@ -519,8 +520,10 @@
       const filterTask = function (t) {
         if (tenantFilter && t.tenant !== tenantFilter) return false;
         if (assigneeFilter && t.assignee !== assigneeFilter) return false;
+        const taskTeams = [t.lead_team, t.audit_team].concat(t.support_teams || []).filter(Boolean);
+        if (teamFilter && taskTeams.indexOf(teamFilter) === -1) return false;
         if (q) {
-          const hay = `${t.id} ${t.title || ""} ${t.assignee || ""} ${t.tenant || ""}`.toLowerCase();
+          const hay = `${t.id} ${t.title || ""} ${t.assignee || ""} ${t.tenant || ""} ${taskTeams.join(" ")}`.toLowerCase();
           if (hay.indexOf(q) === -1) return false;
         }
         return true;
@@ -530,7 +533,7 @@
           return Object.assign({}, col, { tasks: col.tasks.filter(filterTask) });
         }),
       });
-    }, [boardData, tenantFilter, assigneeFilter, search]);
+    }, [boardData, tenantFilter, assigneeFilter, teamFilter, search]);
 
     // --- actions ------------------------------------------------------------
     const moveTask = useCallback(function (taskId, newStatus) {
@@ -694,6 +697,7 @@
           board: boardData,
           tenantFilter, setTenantFilter,
           assigneeFilter, setAssigneeFilter,
+          teamFilter, setTeamFilter,
           includeArchived, setIncludeArchived,
           laneByProfile, setLaneByProfile,
           search, setSearch,
@@ -1349,6 +1353,7 @@
   function BoardToolbar(props) {
     const tenants = (props.board && props.board.tenants) || [];
     const assignees = (props.board && props.board.assignees) || [];
+    const teams = (props.board && props.board.teams) || [];
     return h("div", { className: "flex flex-wrap items-end gap-3" },
       h("div", { className: "flex flex-col gap-1",
                  title: "Fuzzy-match tasks by id, title, or description. Matches across all columns." },
@@ -1383,6 +1388,19 @@
           h(SelectOption, { value: "" }, "All profiles"),
           assignees.map(function (a) {
             return h(SelectOption, { key: a, value: a }, a);
+          }),
+        ),
+      ),
+      h("div", { className: "flex flex-col gap-1",
+                 title: "Filter by lead, support, or audit AI team. Team fields route unassigned tasks to the lead team profile." },
+        h(Label, { className: "text-xs text-muted-foreground" }, "Team"),
+        h(Select, Object.assign({
+          value: props.teamFilter,
+          className: "h-8",
+        }, selectChangeHandler(props.setTeamFilter)),
+          h(SelectOption, { value: "" }, "All teams"),
+          teams.map(function (team) {
+            return h(SelectOption, { key: team, value: team }, team);
           }),
         ),
       ),
@@ -1715,6 +1733,10 @@
               ? h(Badge, { variant: "outline", className: "hermes-kanban-tag",
                            title: `Tenant: ${t.tenant}. Free-form tag for grouping tasks (customer, project, team).` }, t.tenant)
               : null,
+            t.lead_team
+              ? h(Badge, { variant: "outline", className: "hermes-kanban-tag",
+                           title: `Lead team: ${t.lead_team}. Team metadata routes unassigned tasks to the lead team profile.` }, t.lead_team)
+              : null,
             progress
               ? h("span", {
                   className: cn(
@@ -1760,6 +1782,9 @@
     const [priority, setPriority] = useState(0);
     const [parent, setParent] = useState("");
     const [skills, setSkills] = useState("");
+    const [leadTeam, setLeadTeam] = useState("");
+    const [supportTeams, setSupportTeams] = useState("");
+    const [auditTeam, setAuditTeam] = useState("");
     // Workspace controls. `scratch` (default) ignores path; `worktree` optionally
     // takes a path (dispatcher derives one from the assignee profile otherwise);
     // `dir` requires a path. Backend enforces the rule — we only hide/show the
@@ -1785,6 +1810,15 @@
         .map(function (s) { return s.trim(); })
         .filter(function (s) { return s.length > 0; });
       if (skillList.length > 0) body.skills = skillList;
+      const lead = leadTeam.trim();
+      const supportList = supportTeams
+        .split(",")
+        .map(function (s) { return s.trim(); })
+        .filter(function (s) { return s.length > 0; });
+      const audit = auditTeam.trim();
+      if (lead) body.lead_team = lead;
+      if (supportList.length > 0) body.support_teams = supportList;
+      if (audit) body.audit_team = audit;
       // Only send workspace_kind when it's non-default. Keeps the request
       // shape small and interoperable with older dispatcher versions.
       if (workspaceKind && workspaceKind !== "scratch") {
@@ -1794,6 +1828,7 @@
       if (wpTrim) body.workspace_path = wpTrim;
       props.onSubmit(body);
       setTitle(""); setAssignee(""); setPriority(0); setParent(""); setSkills("");
+      setLeadTeam(""); setSupportTeams(""); setAuditTeam("");
       setWorkspaceKind("scratch"); setWorkspacePath("");
     };
 
@@ -1843,6 +1878,29 @@
         title: "Force-load these skills into the worker (in addition to the built-in kanban-worker).",
         className: "h-7 text-xs",
       }),
+      h("div", { className: "grid grid-cols-1 md:grid-cols-3 gap-2" },
+        h(Input, {
+          value: leadTeam,
+          onChange: function (e) { setLeadTeam(e.target.value); },
+          placeholder: "lead team",
+          title: "Primary responsible AI team. Routes unassigned tasks to the lead team profile.",
+          className: "h-7 text-xs",
+        }),
+        h(Input, {
+          value: supportTeams,
+          onChange: function (e) { setSupportTeams(e.target.value); },
+          placeholder: "support teams (comma-separated)",
+          title: "Supporting AI teams, comma-separated.",
+          className: "h-7 text-xs",
+        }),
+        h(Input, {
+          value: auditTeam,
+          onChange: function (e) { setAuditTeam(e.target.value); },
+          placeholder: "audit team",
+          title: "Audit/review AI team.",
+          className: "h-7 text-xs",
+        }),
+      ),
       h("div", { className: "flex gap-2" },
         h(Select, {
           value: workspaceKind,
@@ -2126,6 +2184,7 @@
         h(MetaRow, { label: "Status", value: t.status }),
         h(AssigneeEditor, { task: t, onPatch: props.onPatch }),
         h(PriorityEditor, { task: t, onPatch: props.onPatch }),
+        h(TeamFieldsEditor, { task: t, onPatch: props.onPatch }),
         t.tenant ? h(MetaRow, { label: "Tenant", value: t.tenant }) : null,
         h(MetaRow, {
           label: "Workspace",
@@ -2405,6 +2464,76 @@
         placeholder: "(empty = unassign)",
         className: "h-7 text-xs flex-1",
       }),
+    );
+  }
+
+  function TeamFieldsEditor(props) {
+    const [editing, setEditing] = useState(false);
+    const [lead, setLead] = useState(props.task.lead_team || "");
+    const [support, setSupport] = useState((props.task.support_teams || []).join(", "));
+    const [audit, setAudit] = useState(props.task.audit_team || "");
+    useEffect(function () {
+      setLead(props.task.lead_team || "");
+      setSupport((props.task.support_teams || []).join(", "));
+      setAudit(props.task.audit_team || "");
+    }, [props.task.lead_team, props.task.audit_team, JSON.stringify(props.task.support_teams || [])]);
+    const value = [
+      props.task.lead_team ? "lead: " + props.task.lead_team : "",
+      (props.task.support_teams && props.task.support_teams.length > 0) ? "support: " + props.task.support_teams.join(", ") : "",
+      props.task.audit_team ? "audit: " + props.task.audit_team : "",
+    ].filter(Boolean).join(" / ") || "none";
+    if (!editing) {
+      return h("div", { className: "hermes-kanban-meta-row" },
+        h("span", { className: "hermes-kanban-meta-label" }, "Teams"),
+        h("span", {
+          className: "hermes-kanban-meta-value hermes-kanban-editable",
+          onClick: function () { setEditing(true); },
+          title: "Click to edit team fields",
+        }, value),
+      );
+    }
+    const save = function () {
+      const supportList = support
+        .split(",")
+        .map(function (s) { return s.trim(); })
+        .filter(function (s) { return s.length > 0; });
+      props.onPatch({
+        lead_team: lead.trim() || null,
+        support_teams: supportList,
+        audit_team: audit.trim() || null,
+      }).then(function () { setEditing(false); });
+    };
+    return h("div", { className: "hermes-kanban-meta-row" },
+      h("span", { className: "hermes-kanban-meta-label" }, "Teams"),
+      h("div", { className: "flex flex-col gap-1 flex-1" },
+        h(Input, {
+          value: lead,
+          autoFocus: true,
+          onChange: function (e) { setLead(e.target.value); },
+          placeholder: "lead team",
+          className: "h-7 text-xs",
+        }),
+        h(Input, {
+          value: support,
+          onChange: function (e) { setSupport(e.target.value); },
+          placeholder: "support teams (comma-separated)",
+          className: "h-7 text-xs",
+        }),
+        h(Input, {
+          value: audit,
+          onChange: function (e) { setAudit(e.target.value); },
+          onKeyDown: function (e) {
+            if (e.key === "Enter") { e.preventDefault(); save(); }
+            if (e.key === "Escape") setEditing(false);
+          },
+          placeholder: "audit team",
+          className: "h-7 text-xs",
+        }),
+        h("div", { className: "flex gap-2" },
+          h(Button, { onClick: save, size: "sm" }, "Save"),
+          h(Button, { onClick: function () { setEditing(false); }, size: "sm" }, "Cancel"),
+        ),
+      ),
     );
   }
 

@@ -595,6 +595,9 @@ class Task:
     # JSON array of skill names. None = use only the defaults; empty
     # list = explicitly no extra skills.
     skills: Optional[list] = None
+    lead_team: Optional[str] = None
+    support_teams: Optional[list[str]] = None
+    audit_team: Optional[str] = None
     # Per-task override for the consecutive-failure circuit breaker.
     # The value is the failure count at which the breaker trips — e.g.
     # ``max_retries=1`` blocks on the first failure (zero retries),
@@ -616,6 +619,13 @@ class Task:
                     skills_value = [str(s) for s in parsed if s]
             except Exception:
                 skills_value = None
+        support_teams_value: Optional[list[str]] = None
+        if "support_teams" in keys and row["support_teams"]:
+            try:
+                parsed = json.loads(row["support_teams"])
+                support_teams_value = _normalize_team_list(parsed)
+            except Exception:
+                support_teams_value = None
         return cls(
             id=row["id"],
             title=row["title"],
@@ -664,6 +674,13 @@ class Task:
                 row["current_step_key"] if "current_step_key" in keys else None
             ),
             skills=skills_value,
+            lead_team=(
+                _normalize_team(row["lead_team"]) if "lead_team" in keys else None
+            ),
+            support_teams=support_teams_value,
+            audit_team=(
+                _normalize_team(row["audit_team"]) if "audit_team" in keys else None
+            ),
             max_retries=(
                 row["max_retries"] if "max_retries" in keys else None
             ),
@@ -788,6 +805,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Appended to the dispatcher's built-in `--skills kanban-worker`.
     -- NULL or empty array = no extras.
     skills               TEXT,
+    lead_team            TEXT,
+    support_teams        TEXT,
+    audit_team           TEXT,
     -- Per-task override for the consecutive-failure circuit breaker.
     -- The value is the failure count at which the breaker trips — e.g.
     -- ``max_retries=1`` blocks on the first failure. NULL (the common
@@ -1024,6 +1044,12 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # worker (additive to the built-in `kanban-worker`). NULL is fine
         # for existing rows.
         conn.execute("ALTER TABLE tasks ADD COLUMN skills TEXT")
+    if "lead_team" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN lead_team TEXT")
+    if "support_teams" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN support_teams TEXT")
+    if "audit_team" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN audit_team TEXT")
 
     if "max_retries" not in cols:
         # Per-task override for the consecutive-failure circuit breaker.
@@ -1172,6 +1198,175 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+TEAM_NAMES = {
+    "開発・自動化",
+    "商品・運用",
+    "事業・利益",
+    "通知・承認",
+    "インフラ・監視",
+    "品質・リスク",
+}
+
+TEAM_DEFAULT_ASSIGNEES = {
+    "事業・利益": "hermes-pm",
+    "商品・運用": "hermes-pm",
+    "開発・自動化": "technical-director",
+    "品質・リスク": "release-verifier",
+    "インフラ・監視": "mission-state-manager",
+    "通知・承認": "hermes-pm",
+}
+
+TEAM_ALIASES = {
+    "dev": "開発・自動化",
+    "development": "開発・自動化",
+    "engineering": "開発・自動化",
+    "engineer": "開発・自動化",
+    "開発": "開発・自動化",
+    "開発自動化": "開発・自動化",
+    "開発・自動化": "開発・自動化",
+    "開発/自動化": "開発・自動化",
+    "automation": "開発・自動化",
+    "product": "商品・運用",
+    "ops": "商品・運用",
+    "商品": "商品・運用",
+    "商品運用": "商品・運用",
+    "商品・運用": "商品・運用",
+    "business": "事業・利益",
+    "profit": "事業・利益",
+    "growth": "事業・利益",
+    "事業": "事業・利益",
+    "利益": "事業・利益",
+    "事業利益": "事業・利益",
+    "事業・利益": "事業・利益",
+    "approval": "通知・承認",
+    "notify": "通知・承認",
+    "notification": "通知・承認",
+    "通知": "通知・承認",
+    "承認": "通知・承認",
+    "通知承認": "通知・承認",
+    "通知・承認": "通知・承認",
+    "infra": "インフラ・監視",
+    "infrastructure": "インフラ・監視",
+    "monitoring": "インフラ・監視",
+    "monitor": "インフラ・監視",
+    "インフラ": "インフラ・監視",
+    "監視": "インフラ・監視",
+    "インフラ監視": "インフラ・監視",
+    "インフラ・監視": "インフラ・監視",
+    "quality": "品質・リスク",
+    "risk": "品質・リスク",
+    "qa": "品質・リスク",
+    "audit": "品質・リスク",
+    "review": "品質・リスク",
+    "品質": "品質・リスク",
+    "リスク": "品質・リスク",
+    "品質リスク": "品質・リスク",
+    "品質・リスク": "品質・リスク",
+}
+
+
+def _team_alias_key(team: str) -> str:
+    return (
+        str(team or "")
+        .strip()
+        .lower()
+        .replace("　", "")
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("_", "")
+        .replace("/", "")
+        .replace("／", "")
+        .replace("・", "")
+    )
+
+
+def _normalize_team(team: Optional[str]) -> Optional[str]:
+    """Return a canonical team name, or None for blank values."""
+    if team is None:
+        return None
+    value = str(team).strip()
+    if not value:
+        return None
+    if value in TEAM_NAMES:
+        return value
+    return TEAM_ALIASES.get(_team_alias_key(value), value)
+
+
+def _normalize_team_list(teams: Optional[Iterable[str]]) -> Optional[list[str]]:
+    """Clean a team-name iterable into a deduped list, or None when empty."""
+    if teams is None:
+        return None
+    if isinstance(teams, (str, bytes)):
+        values: Iterable[Any] = [teams]
+    else:
+        values = teams
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for team in values:
+        value = _normalize_team(str(team) if team is not None else None)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    return cleaned or None
+
+
+def default_assignee_for_team(team: Optional[str]) -> Optional[str]:
+    """Return the Team Lead profile that should pick up a team-owned task."""
+    canonical = _normalize_team(team)
+    if not canonical:
+        return None
+    return TEAM_DEFAULT_ASSIGNEES.get(canonical)
+
+
+_UNSET = object()
+
+
+def update_task_teams(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    lead_team: Any = _UNSET,
+    support_teams: Any = _UNSET,
+    audit_team: Any = _UNSET,
+) -> bool:
+    """Patch task team fields without touching dispatch assignment.
+
+    ``_UNSET`` means leave the field unchanged; ``None`` or blank strings
+    clear scalar fields; an empty support-team list clears that field.
+    """
+    sets: list[str] = []
+    vals: list[Any] = []
+    payload: dict[str, Any] = {}
+    if lead_team is not _UNSET:
+        normalized = _normalize_team(lead_team)
+        sets.append("lead_team = ?")
+        vals.append(normalized)
+        payload["lead_team"] = normalized
+    if support_teams is not _UNSET:
+        normalized_list = _normalize_team_list(support_teams)
+        sets.append("support_teams = ?")
+        vals.append(json.dumps(normalized_list) if normalized_list is not None else None)
+        payload["support_teams"] = normalized_list
+    if audit_team is not _UNSET:
+        normalized = _normalize_team(audit_team)
+        sets.append("audit_team = ?")
+        vals.append(normalized)
+        payload["audit_team"] = normalized
+    if not sets:
+        return get_task(conn, task_id) is not None
+    vals.append(task_id)
+    with write_txn(conn):
+        cur = conn.execute(
+            f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(conn, task_id, "team_fields_updated", payload)
+    return True
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -1189,6 +1384,9 @@ def create_task(
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None,
+    lead_team: Optional[str] = None,
+    support_teams: Optional[Iterable[str]] = None,
+    audit_team: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -1215,6 +1413,11 @@ def create_task(
     translation skill regardless of the profile's default config).
     """
     assignee = _canonical_assignee(assignee)
+    lead_team = _normalize_team(lead_team)
+    support_teams_list = _normalize_team_list(support_teams)
+    audit_team = _normalize_team(audit_team)
+    if assignee is None and lead_team:
+        assignee = _canonical_assignee(default_assignee_for_team(lead_team))
     if not title or not title.strip():
         raise ValueError("title is required")
     if workspace_kind not in VALID_WORKSPACE_KINDS:
@@ -1303,8 +1506,8 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         tenant, idempotency_key, max_runtime_seconds, skills,
-                        max_retries
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        lead_team, support_teams, audit_team, max_retries
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -1321,6 +1524,12 @@ def create_task(
                         idempotency_key,
                         int(max_runtime_seconds) if max_runtime_seconds else None,
                         json.dumps(skills_list) if skills_list is not None else None,
+                        lead_team,
+                        (
+                            json.dumps(support_teams_list)
+                            if support_teams_list is not None else None
+                        ),
+                        audit_team,
                         int(max_retries) if max_retries is not None else None,
                     ),
                 )
@@ -1339,6 +1548,9 @@ def create_task(
                         "parents": list(parents),
                         "tenant": tenant,
                         "skills": list(skills_list) if skills_list else None,
+                        "lead_team": lead_team,
+                        "support_teams": support_teams_list,
+                        "audit_team": audit_team,
                     },
                 )
             return task_id
@@ -2176,6 +2388,92 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+class CompletionContractError(ValueError):
+    """Raised when a controlled task is being completed without evidence."""
+
+    def __init__(self, task_id: str, reason: str):
+        self.task_id = task_id
+        self.reason = reason
+        super().__init__(f"completion blocked for {task_id}: {reason}")
+
+
+_CONTROLLED_COMPLETION_MARKERS = (
+    "DEVELOPMENT_TASK_CONTRACT",
+    "CLEAN_REVIEW_PACKET",
+    "CORE_MISSION_CONTRACT",
+    "DIRECT_JOB_ARTIFACT_RECOVERY",
+    "DIRECT_JOB_BLOCKED_REPORT",
+)
+_ALLOWED_COMPLETION_MARKERS = {
+    "IMPLEMENTATION_COMPLETE",
+    "FOCUSED_TEST_PASS",
+    "REVIEW_PASS",
+    "RELEASE_VERIFY_PASS",
+}
+_BLOCKED_COMPLETION_RE = re.compile(
+    r"("
+    r"DIRECT_JOB_BLOCKED_REPORT|未完/blocked|未完です|完了とは言えません|"
+    r"overall status\s+(?:is\s+)?[`\"']?blocked|"
+    r"blocked before provider execution|do not integrate|integration should remain blocked"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _non_empty_metadata_list(metadata: dict, key: str) -> bool:
+    value = metadata.get(key)
+    return isinstance(value, list) and any(str(item).strip() for item in value)
+
+
+def _completion_contract_reason(
+    task: Task,
+    *,
+    result: Optional[str],
+    summary: Optional[str],
+    metadata: Optional[dict],
+) -> Optional[str]:
+    """Return a block reason when a task tries to complete without proof.
+
+    This is the central harness-level guard for the "rules exist but do not
+    stop anything" failure mode. Normal ad-hoc Kanban cards remain lightweight;
+    cards carrying mission/review/recovery contracts must close with structured
+    evidence, not prose confidence.
+    """
+    scan_text = "\n".join(str(item or "") for item in (task.title, task.body, result, summary))
+    if _BLOCKED_COMPLETION_RE.search(scan_text):
+        return "blocked/unfinished report cannot be completed; block or route follow-up instead"
+
+    contract_text = "\n".join(str(item or "") for item in (task.title, task.body))
+    if not any(marker in contract_text for marker in _CONTROLLED_COMPLETION_MARKERS):
+        return None
+
+    meta = metadata if isinstance(metadata, dict) else {}
+    marker = str(meta.get("completion_marker") or "").strip()
+    if marker == "BLOCKED_NEEDS_INPUT":
+        return "BLOCKED_NEEDS_INPUT must block the task, not complete it"
+    if marker not in _ALLOWED_COMPLETION_MARKERS:
+        return "controlled task missing valid completion_marker"
+
+    has_tests = _non_empty_metadata_list(meta, "tests") or _non_empty_metadata_list(meta, "tests_run")
+    has_evidence = _non_empty_metadata_list(meta, "evidence_paths")
+    has_changed_files = _non_empty_metadata_list(meta, "changed_files")
+    has_journal_refs = _non_empty_metadata_list(meta, "journal_refs")
+
+    if "CLEAN_REVIEW_PACKET" in contract_text or marker in {"REVIEW_PASS", "RELEASE_VERIFY_PASS"}:
+        if not has_tests or not has_evidence:
+            return "review/verifier completion requires tests and evidence_paths"
+    elif marker in {"IMPLEMENTATION_COMPLETE", "FOCUSED_TEST_PASS"}:
+        if not has_tests:
+            return "implementation completion requires tests"
+        if not (has_changed_files or has_evidence):
+            return "implementation completion requires changed_files or evidence_paths"
+
+    if "CORE_MISSION_CONTRACT" in contract_text or "DIRECT_JOB_ARTIFACT_RECOVERY" in contract_text:
+        if not (has_tests or has_evidence or has_journal_refs):
+            return "core/recovery completion requires tests, evidence_paths, or journal_refs"
+    return None
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2215,6 +2513,31 @@ def complete_task(
     and never blocks.
     """
     now = int(time.time())
+    task = get_task(conn, task_id)
+    if task is None:
+        return False
+    contract_reason = _completion_contract_reason(
+        task,
+        result=result,
+        summary=summary,
+        metadata=metadata,
+    )
+    if contract_reason:
+        with write_txn(conn):
+            _append_event(
+                conn,
+                task_id,
+                "completion_blocked_contract",
+                {
+                    "reason": contract_reason,
+                    "summary_preview": (
+                        (summary or result or "").strip().splitlines()[0][:200]
+                        if (summary or result)
+                        else None
+                    ),
+                },
+            )
+        raise CompletionContractError(task_id, contract_reason)
 
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a

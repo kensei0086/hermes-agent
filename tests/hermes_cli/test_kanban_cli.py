@@ -119,6 +119,29 @@ def test_run_slash_json_output(kanban_home):
     assert payload["status"] == "ready"
 
 
+def test_run_slash_team_set_updates_existing_task(kanban_home):
+    out = kc.run_slash("create 'needs team' --assignee alice")
+    import re
+    tid = re.search(r"(t_[a-f0-9]+)", out).group(1)
+
+    updated = kc.run_slash(
+        f"team set {tid} --lead-team dev --support-team qa --support-team approval --audit-team risk --json"
+    )
+    payload = json.loads(updated)
+
+    assert payload["lead_team"] == "開発・自動化"
+    assert payload["support_teams"] == ["品質・リスク", "通知・承認"]
+    assert payload["audit_team"] == "品質・リスク"
+
+
+def test_run_slash_create_with_lead_team_assigns_team_lead(kanban_home):
+    out = kc.run_slash("create 'team lead routed' --lead-team 品質リスク --json")
+    payload = json.loads(out)
+
+    assert payload["lead_team"] == "品質・リスク"
+    assert payload["assignee"] == "release-verifier"
+
+
 def test_run_slash_dispatch_dry_run_counts(kanban_home):
     kc.run_slash("create 'a' --assignee alice")
     kc.run_slash("create 'b' --assignee bob")

@@ -146,6 +146,43 @@ def _task_dict(
     return d
 
 
+def _payload_field_set(payload: BaseModel) -> set[str]:
+    """Return fields explicitly supplied by a pydantic v1/v2 model."""
+    fields = getattr(payload, "model_fields_set", None)
+    if fields is None:
+        fields = getattr(payload, "__fields_set__", set())
+    return set(fields or set())
+
+
+def _patch_team_fields(
+    conn: sqlite3.Connection,
+    task_id: str,
+    payload: BaseModel,
+) -> None:
+    fields = _payload_field_set(payload)
+    kwargs: dict[str, Any] = {}
+    for name in ("lead_team", "support_teams", "audit_team"):
+        if name in fields:
+            kwargs[name] = getattr(payload, name)
+    if not kwargs:
+        return
+    if not kanban_db.update_task_teams(conn, task_id, **kwargs):
+        raise HTTPException(status_code=404, detail="task not found")
+
+
+def _teams_from_tasks(tasks: list[kanban_db.Task]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for task in tasks:
+        values: list[Optional[str]] = [task.lead_team, task.audit_team]
+        values.extend(task.support_teams or [])
+        for value in values:
+            if value and value not in seen:
+                seen.add(value)
+                out.append(value)
+    return sorted(out)
+
+
 def _event_dict(event: kanban_db.Event) -> dict[str, Any]:
     return {
         "id": event.id,
@@ -444,6 +481,7 @@ def get_board(
             ],
             "tenants": tenants,
             "assignees": assignees,
+            "teams": _teams_from_tasks(tasks),
             "latest_event_id": int(latest_event_id),
             "now": int(time.time()),
         }
@@ -495,6 +533,9 @@ class CreateTaskBody(BaseModel):
     body: Optional[str] = None
     assignee: Optional[str] = None
     tenant: Optional[str] = None
+    lead_team: Optional[str] = None
+    support_teams: Optional[list[str]] = None
+    audit_team: Optional[str] = None
     priority: int = 0
     workspace_kind: str = "scratch"
     workspace_path: Optional[str] = None
@@ -525,6 +566,9 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             idempotency_key=payload.idempotency_key,
             max_runtime_seconds=payload.max_runtime_seconds,
             skills=payload.skills,
+            lead_team=payload.lead_team,
+            support_teams=payload.support_teams,
+            audit_team=payload.audit_team,
         )
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
@@ -559,6 +603,9 @@ class UpdateTaskBody(BaseModel):
     priority: Optional[int] = None
     title: Optional[str] = None
     body: Optional[str] = None
+    lead_team: Optional[str] = None
+    support_teams: Optional[list[str]] = None
+    audit_team: Optional[str] = None
     result: Optional[str] = None
     block_reason: Optional[str] = None
     # Structured handoff fields — forwarded to complete_task when status
@@ -661,6 +708,8 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     "VALUES (?, 'edited', NULL, ?)",
                     (task_id, int(time.time())),
                 )
+
+        _patch_team_fields(conn, task_id, payload)
 
         updated = kanban_db.get_task(conn, task_id)
         return {"task": _task_dict(updated) if updated else None}
@@ -807,6 +856,9 @@ class BulkTaskBody(BaseModel):
     status: Optional[str] = None
     assignee: Optional[str] = None  # "" or None = unassign
     priority: Optional[int] = None
+    lead_team: Optional[str] = None
+    support_teams: Optional[list[str]] = None
+    audit_team: Optional[str] = None
     archive: bool = False
     result: Optional[str] = None
     summary: Optional[str] = None
@@ -883,6 +935,7 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                             (tid, json.dumps({"priority": int(payload.priority)}),
                              int(time.time())),
                         )
+                _patch_team_fields(conn, tid, payload)
             except Exception as e:  # defensive — one bad id shouldn't kill the batch
                 entry.update(ok=False, error=str(e))
             results.append(entry)

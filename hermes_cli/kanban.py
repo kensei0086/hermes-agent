@@ -70,6 +70,9 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "completed_at": t.completed_at,
         "result": t.result,
         "skills": list(t.skills) if t.skills else [],
+        "lead_team": t.lead_team,
+        "support_teams": list(t.support_teams) if t.support_teams else None,
+        "audit_team": t.audit_team,
         "max_retries": t.max_retries,
     }
 
@@ -267,6 +270,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_create.add_argument("--workspace", default="scratch",
                           help="scratch | worktree | dir:<path> (default: scratch)")
     p_create.add_argument("--tenant", default=None, help="Tenant namespace")
+    p_create.add_argument("--lead-team", default=None,
+                          help="Primary responsible AI team for this task")
+    p_create.add_argument("--support-team", action="append", default=[],
+                          help="Supporting AI team for this task (repeatable)")
+    p_create.add_argument("--audit-team", default=None,
+                          help="Audit/review AI team for this task")
     p_create.add_argument("--priority", type=int, default=0, help="Priority tiebreaker")
     p_create.add_argument("--triage", action="store_true",
                           help="Park in triage — a specifier will flesh out the spec and promote to todo")
@@ -317,6 +326,25 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_assign = sub.add_parser("assign", help="Assign or reassign a task")
     p_assign.add_argument("task_id")
     p_assign.add_argument("profile", help="Profile name (or 'none' to unassign)")
+
+    # --- team fields ---
+    p_team = sub.add_parser("team", help="Inspect or update task team ownership")
+    team_sub = p_team.add_subparsers(dest="team_action")
+    p_team_set = team_sub.add_parser("set", help="Set team ownership fields on an existing task")
+    p_team_set.add_argument("task_id")
+    p_team_set.add_argument("--lead-team", default=None,
+                            help="Primary responsible AI team. Use --clear-lead to clear.")
+    p_team_set.add_argument("--support-team", action="append", default=[],
+                            help="Supporting AI team (repeatable). Use --clear-support to clear.")
+    p_team_set.add_argument("--audit-team", default=None,
+                            help="Audit/review AI team. Use --clear-audit to clear.")
+    p_team_set.add_argument("--clear-lead", action="store_true",
+                            help="Clear lead_team")
+    p_team_set.add_argument("--clear-support", action="store_true",
+                            help="Clear support_teams")
+    p_team_set.add_argument("--clear-audit", action="store_true",
+                            help="Clear audit_team")
+    p_team_set.add_argument("--json", action="store_true")
 
     # --- reclaim / reassign (recovery) ---
     p_reclaim = sub.add_parser(
@@ -694,6 +722,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "ls":       _cmd_list,
         "show":     _cmd_show,
         "assign":   _cmd_assign,
+        "team":     _cmd_team,
         "reclaim":  _cmd_reclaim,
         "reassign": _cmd_reassign,
         "diagnostics": _cmd_diagnostics,
@@ -1054,6 +1083,9 @@ def _cmd_create(args: argparse.Namespace) -> int:
             max_runtime_seconds=max_runtime,
             skills=getattr(args, "skills", None) or None,
             max_retries=max_retries,
+            lead_team=getattr(args, "lead_team", None),
+            support_teams=getattr(args, "support_team", None) or None,
+            audit_team=getattr(args, "audit_team", None),
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
@@ -1285,6 +1317,59 @@ def _cmd_assign(args: argparse.Namespace) -> int:
         print(f"no such task: {args.task_id}", file=sys.stderr)
         return 1
     print(f"Assigned {args.task_id} to {profile or '(unassigned)'}")
+    return 0
+
+
+def _cmd_team(args: argparse.Namespace) -> int:
+    action = getattr(args, "team_action", None)
+    if action != "set":
+        print("kanban team: expected subcommand 'set'", file=sys.stderr)
+        return 2
+
+    support_team = list(getattr(args, "support_team", None) or [])
+    updates: dict[str, Any] = {}
+    if getattr(args, "clear_lead", False):
+        if getattr(args, "lead_team", None):
+            print("kanban team set: use either --lead-team or --clear-lead", file=sys.stderr)
+            return 2
+        updates["lead_team"] = None
+    elif getattr(args, "lead_team", None) is not None:
+        updates["lead_team"] = args.lead_team
+
+    if getattr(args, "clear_support", False):
+        if support_team:
+            print("kanban team set: use either --support-team or --clear-support", file=sys.stderr)
+            return 2
+        updates["support_teams"] = []
+    elif support_team:
+        updates["support_teams"] = support_team
+
+    if getattr(args, "clear_audit", False):
+        if getattr(args, "audit_team", None):
+            print("kanban team set: use either --audit-team or --clear-audit", file=sys.stderr)
+            return 2
+        updates["audit_team"] = None
+    elif getattr(args, "audit_team", None) is not None:
+        updates["audit_team"] = args.audit_team
+
+    if not updates:
+        print("kanban team set: provide at least one team field or clear flag", file=sys.stderr)
+        return 2
+
+    with kb.connect() as conn:
+        ok = kb.update_task_teams(conn, args.task_id, **updates)
+        task = kb.get_task(conn, args.task_id)
+    if not ok or task is None:
+        print(f"no such task: {args.task_id}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
+    else:
+        support = ", ".join(task.support_teams or []) if task.support_teams else "-"
+        print(
+            f"Updated team fields for {args.task_id}: "
+            f"lead={task.lead_team or '-'} support={support} audit={task.audit_team or '-'}"
+        )
     return 0
 
 
