@@ -592,6 +592,7 @@ class APIServerAdapter(BasePlatformAdapter):
         self._model_name: str = self._resolve_model_name(
             extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
         )
+        self._extra: Dict[str, Any] = dict(extra)
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
@@ -3119,6 +3120,19 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
+            try:
+                from gateway.platforms.omnideck_translation import handle_omnideck_translation_request
+
+                self._app.router.add_post(
+                    "/omnideck/translation",
+                    lambda request: handle_omnideck_translation_request(
+                        request,
+                        config_extra=self._extra,
+                        max_body_bytes=MAX_REQUEST_BYTES,
+                    ),
+                )
+            except Exception as exc:
+                logger.warning("[%s] Omnideck translation route disabled: %s", self.name, exc)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
