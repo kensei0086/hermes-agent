@@ -1,4 +1,4 @@
-name: Build Skills Index
+name: スキル索引の生成と公開
 
 on:
   schedule:
