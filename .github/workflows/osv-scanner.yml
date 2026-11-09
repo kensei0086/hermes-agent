@@ -1,4 +1,4 @@
-name: OSV-Scanner
+name: 依存関係の脆弱性検査
 
 # Scans lockfiles (uv.lock, package-lock.json) against the OSV vulnerability
 # database. Runs on every PR that touches a lockfile and on a weekly schedule
